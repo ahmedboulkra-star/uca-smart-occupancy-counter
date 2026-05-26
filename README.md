@@ -9,9 +9,9 @@ Un système embarqué de comptage bidirectionnel automatisé pour surveiller l'o
 ## 👥 Notre Équipe
 
 * **Boulkra Ahmed**
-    * *Rôle :* Gestion du matériel, isolation physique des capteurs & encodage de la charge utile (payload).
+    * *Rôle :* Algorithme central (Machine d'États FSM), configuration du réseau LoRaWAN & architecture du dépôt Git.
 * **Mecherouh Mohamed Ilyes**
-    * *Rôle :* Algorithme central (Machine d'États FSM), configuration réseau & architecture du dépôt Git.
+    * *Rôle :* Gestion de la carte matérielle, câblage, isolation physique des capteurs & gestion de la structure de la charge utile.
 
 ---
 
@@ -83,7 +83,7 @@ Smart_Occupancy_Counter/
 ├── Code/
 │   └── occupancy_counter.ino          # Code source Arduino complet injecté avec clés OTAA
 ├── doc/
-│   ├── BoulkraAhmed.md                # Journal de suivi matériel d'Ahmed
-│   └── MecherouhMohamedIlyes.md       # Journal de suivi logiciel de Mohamed Ilyes
+│   ├── BoulkraAhmed.md                # Journal de suivi logiciel d'Ahmed
+│   └── MecherouhMohamedIlyes.md       # Journal de suivi matériel de Mohamed Ilyes
 └── Presentation/
     └── Smart_Occupancy_Counter.pdf    # Support visuel pour la soutenance orale finale

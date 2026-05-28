@@ -5,178 +5,164 @@
 // Université Côte d'Azur - Campus Valrose
 // ============================================================
 
-#include <lorawan.h>
+#include <lmic.h>
+#include <hal/hal.h>
+#include <SPI.h>
 
-// 1. HARDWARE PIN CONFIGURATIONS
+// ===== YOUR LoRaWAN CREDENTIALS =====
+static const u4_t DEVADDR = 0x260B211F;
+
+static const PROGMEM u1_t NWKSKEY[16] = {
+    0x71, 0x06, 0x1B, 0x1E, 0x72, 0x15, 0x25, 0xB3,
+    0x24, 0x88, 0xEB, 0xC1, 0x8D, 0x84, 0xC5, 0x2A
+};
+
+static const u1_t PROGMEM APPSKEY[16] = {
+    0x4A, 0xC2, 0x92, 0x23, 0x4D, 0xAB, 0x15, 0x66,
+    0x3E, 0xF4, 0x5B, 0xB1, 0x54, 0xC4, 0x54, 0x9B
+};
+
+// ===== PIR PINS =====
 const int pir1Power = A2;
-const int pir1Pin   = A3; // PIR1: Extérieur (Outside)
+const int pir1Pin = A3;
 const int pir2Power = A0;
-const int pir2Pin   = A1; // PIR2: Intérieur (Inside)
+const int pir2Pin = A1;
 
-// 2. STATE TRACKING VARIABLES
+// ===== PIR VARIABLES =====
 int lastState1 = LOW;
 int lastState2 = LOW;
-
-bool pir1Triggered = false;
-bool pir2Triggered = false;
-unsigned long lastPIR1Time = 0;
-unsigned long lastPIR2Time = 0;
-
-// 3. OPTIMIZED TIMING FOR SIDE-BY-SIDE SENSORS
-// Crucial: Narrowed down to 800ms because the physical distance is tiny!
-const unsigned long SEQUENCE_WINDOW = 800;  
-const unsigned long SYSTEM_COOLDOWN = 2000; // 2-second blinding window to allow physical PIR reset
-unsigned long globalCooldownTimer  = 0;
-
+unsigned long lastChange1 = 0;
+unsigned long lastChange2 = 0;
+unsigned long lastDirectionTime = 0;
 int peopleCount = 0;
-const int ROOM_ID = 101; // Your unique Room/Module ID
 
-// 4. LORAWAN TTN V3 CREDENTIALS (OTAA MODE)
-// 🔑 Your customized generated keys from The Things Network V3 Console
-const char *devEui = "70B3D57ED0077B70"; 
-const char *appEui = "0000000000000000"; 
-const char *appKey = "B985AF0E8669C2D07C51988C66D2D562";
+// TIMINGS (more forgiving)
+const unsigned long DEBOUNCE = 80;        // 80ms debounce
+const unsigned long SEQUENCE_WINDOW = 3000; // 3 seconds to complete
+const unsigned long COOLDOWN = 1000;       // 1 second cooldown
 
-// 5. REGULATORY LORA TRANSMISSION CONTROL
-// Limits radio updates to a safe window to avoid violating European Duty Cycles
-const unsigned long TX_INTERVAL = 10000; 
-unsigned long lastTxTime = 0;
-bool pendingUplink = false;
+// ===== LoRa =====
+static osjob_t sendjob;
+char payloadBuffer[32];
+const unsigned TX_INTERVAL = 30;
+
+const lmic_pinmap lmic_pins = {
+    .nss = 10,
+    .rxtx = LMIC_UNUSED_PIN,
+    .rst = 8,
+    .dio = {6, 6, 6},
+};
+
+void os_getArtEui(u1_t* buf) { }
+void os_getDevEui(u1_t* buf) { }
+void os_getDevKey(u1_t* buf) { }
+
+void sendLoRa() {
+    if (LMIC.opmode & OP_TXRXPEND) return;
+    snprintf(payloadBuffer, sizeof(payloadBuffer), "101:%d", peopleCount);
+    LMIC_setTxData2(1, (uint8_t*)payloadBuffer, strlen(payloadBuffer), 0);
+    Serial.print(F("Sent: "));
+    Serial.println(payloadBuffer);
+}
+
+void onEvent(ev_t ev) {
+    if (ev == EV_TXCOMPLETE) {
+        os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL), sendLoRa);
+    }
+}
 
 void setup() {
-  Serial.begin(115200);
-
-  // Initialize PIR1 Hardware
-  pinMode(pir1Power, OUTPUT);
-  digitalWrite(pir1Power, HIGH);
-  pinMode(pir1Pin, INPUT);
-
-  // Initialize PIR2 Hardware
-  pinMode(pir2Power, OUTPUT);
-  digitalWrite(pir2Power, HIGH);
-  pinMode(pir2Pin, INPUT);
-
-  Serial.println(F("============================================="));
-  Serial.println(F("      UCA SMART OCCUPANCY SYSTEM READY       "));
-  Serial.println(F("============================================="));
-  
-  // Warmup Period: Crucial for PIR components to stabilize internal reference voltages
-  Serial.println(F("[INFO] Stabilizing PIR pyroelectric sensors... Stand clear."));
-  delay(15000); 
-
-  // Initialize UCA Integrated LoRa Transceiver
-  if (!LoraWANDevice.begin(EU868)) {
-    Serial.println(F("[ERROR] Hardware Fault: LoRa radio initialization failed!"));
-    while (1); // Halt execution if hardware is missing
-  }
-  
-  // Feed parameters to the LoRaWAN Stack
-  LoraWANDevice.setDevEUI(devEui);
-  LoraWANDevice.setAppEUI(appEui);
-  LoraWANDevice.setAppKey(appKey);
-  
-  Serial.println(F("[LORA] Handshaking... Joining TTN V3 Network via OTAA..."));
-  while (!LoraWANDevice.join()) {
-    Serial.println(F("[LORA] Gateway rejected or missed handshake. Retrying in 6s..."));
-    delay(6000);
-  }
-  Serial.println(F("[LORA] Handshake Complete! Node successfully joined TTN V3."));
-  
-  Serial.print(F("Current Room Baseline Occupancy: "));
-  Serial.println(peopleCount);
-  Serial.println(F("---------------------------------------------"));
+    Serial.begin(115200);
+    
+    pinMode(pir1Power, OUTPUT);
+    digitalWrite(pir1Power, HIGH);
+    pinMode(pir1Pin, INPUT);
+    
+    pinMode(pir2Power, OUTPUT);
+    digitalWrite(pir2Power, HIGH);
+    pinMode(pir2Pin, INPUT);
+    
+    Serial.println(F("=== SMART OCCUPANCY COUNTER ==="));
+    delay(10000);
+    
+    os_init();
+    LMIC_reset();
+    
+    uint8_t appskey[sizeof(APPSKEY)];
+    uint8_t nwkskey[sizeof(NWKSKEY)];
+    memcpy_P(appskey, APPSKEY, sizeof(APPSKEY));
+    memcpy_P(nwkskey, NWKSKEY, sizeof(NWKSKEY));
+    LMIC_setSession(0x1, DEVADDR, nwkskey, appskey);
+    
+    LMIC_setClockError(MAX_CLOCK_ERROR * 2 / 100);
+    LMIC_setLinkCheckMode(0);
+    LMIC_setDrTxpow(DR_SF9, 14);
+    
+    Serial.println(F("Ready! Count: 0"));
+    sendLoRa();
 }
 
 void loop() {
-  // Keep the underlying LoRaWAN engine, background cycles, and downlinks alive
-  LoraWANDevice.loop();
-
-  int currentState1 = digitalRead(pir1Pin);
-  int currentState2 = digitalRead(pir2Pin);
-  unsigned long now = millis();
-
-  // Step A: Auto-clear expired sequences if a person turns back halfway through the doorway
-  if (pir1Triggered && (now - lastPIR1Time > SEQUENCE_WINDOW)) pir1Triggered = false;
-  if (pir2Triggered && (now - lastPIR2Time > SEQUENCE_WINDOW)) pir2Triggered = false;
-
-  // Step B: Evaluate inputs only if we aren't in the global blind cooldown window
-  if (now - globalCooldownTimer > SYSTEM_COOLDOWN) {
-
-    // ==================== PIR1 DETECTION (OUTSIDE) ====================
-    if (currentState1 == HIGH && lastState1 == LOW) {
-      lastState1 = HIGH;
-      if (pir2Triggered) { 
-        // Logic Pathway: PIR2 (Inside) -> PIR1 (Outside) = EXIT
-        peopleCount = max(0, peopleCount - 1); // Floor lock at 0
-        registerMovementEvent(now, "SORTIE (EXIT)");
-      } else if (!pir1Triggered) {
-        // First step of entering
-        pir1Triggered = true;
-        lastPIR1Time = now;
-      }
+    os_runloop_once();
+    
+    int s1 = digitalRead(pir1Pin);
+    int s2 = digitalRead(pir2Pin);
+    unsigned long now = millis();
+    
+    // Check if system is in cooldown
+    bool inCooldown = (now - lastDirectionTime) < COOLDOWN;
+    
+    // ---- PIR1 (OUTSIDE) ----
+    if (s1 == HIGH && lastState1 == LOW && !inCooldown) {
+        lastChange1 = now;
+        delay(DEBOUNCE);
+        if (digitalRead(pir1Pin) == HIGH) {
+            lastState1 = HIGH;
+            
+            // Check if PIR2 was triggered recently (EXIT)
+            if ((now - lastChange2) < SEQUENCE_WINDOW && lastChange2 > 0) {
+                if (peopleCount > 0) {
+                    peopleCount--;
+                    Serial.print(F("<<< EXIT  | Count: "));
+                    Serial.println(peopleCount);
+                    lastDirectionTime = now;
+                    sendLoRa();
+                }
+                lastChange2 = 0;
+            }
+        }
     } 
-    else if (currentState1 == LOW && lastState1 == HIGH) {
-      lastState1 = LOW;
+    else if (s1 == LOW && lastState1 == HIGH) {
+        lastState1 = LOW;
     }
-
-    // ==================== PIR2 DETECTION (INSIDE) ====================
-    if (currentState2 == HIGH && lastState2 == LOW) {
-      lastState2 = HIGH;
-      if (pir1Triggered) { 
-        // Logic Pathway: PIR1 (Outside) -> PIR2 (Inside) = ENTRY
-        peopleCount++;
-        registerMovementEvent(now, "ENTREE (ENTRY)");
-      } else if (!pir2Triggered) {
-        // First step of leaving
-        pir2Triggered = true;
-        lastPIR2Time = now;
-      }
+    
+    // ---- PIR2 (INSIDE) ----
+    if (s2 == HIGH && lastState2 == LOW && !inCooldown) {
+        lastChange2 = now;
+        delay(DEBOUNCE);
+        if (digitalRead(pir2Pin) == HIGH) {
+            lastState2 = HIGH;
+            
+            // Check if PIR1 was triggered recently (ENTRY)
+            if ((now - lastChange1) < SEQUENCE_WINDOW && lastChange1 > 0) {
+                peopleCount++;
+                Serial.print(F(">>> ENTRY | Count: "));
+                Serial.println(peopleCount);
+                lastDirectionTime = now;
+                sendLoRa();
+                lastChange1 = 0;
+            }
+        }
     } 
-    else if (currentState2 == LOW && lastState2 == HIGH) {
-      lastState2 = LOW;
+    else if (s2 == LOW && lastState2 == HIGH) {
+        lastState2 = LOW;
     }
-  }
-
-  // Step C: Deferred Uplink Handler (Adheres safely to European 1% Duty-Cycle Laws)
-  if (pendingUplink && (now - lastTxTime >= TX_INTERVAL)) {
-    sendDataPacket();
-    lastTxTime = now;
-    pendingUplink = false; // Reset request flag
-  }
-}
-
-// 6. HELPER FUNCTIONS
-void registerMovementEvent(unsigned long timestamp, const char* eventString) {
-  Serial.print(F("[EVENT] "));
-  Serial.print(eventString);
-  Serial.print(F(" | Real-time Occupancy Total: "));
-  Serial.println(peopleCount);
-  
-  // Clear directional tracking locks
-  pir1Triggered = false;
-  pir2Triggered = false;
-  
-  // Engage the blinding window timer to mask physical PIR trailing signals
-  globalCooldownTimer = timestamp; 
-  
-  // Request a network broadcast
-  pendingUplink = true; 
-}
-
-void sendDataPacket() {
-  // LoRaWAN payloads must be packed raw bytes. 
-  // We use 3 bytes to match the presentation specifications: [Room ID, Count, Type Flag]
-  uint8_t uplinkBuffer[3];
-  uplinkBuffer[0] = (uint8_t)ROOM_ID;       // Identifies your classroom
-  uplinkBuffer[1] = (uint8_t)peopleCount;   // The tracking counter
-  uplinkBuffer[2] = 0x0A;                   // Event status flag (0x0A = Counter update)
-
-  Serial.println(F("[LORA] Pushing fresh data bytes onto TTN V3 network..."));
-  
-  // Parameters: send(buffer_size, buffer_ptr, port_num, request_acknowledgement)
-  if (LoraWANDevice.send(sizeof(uplinkBuffer), uplinkBuffer, 1, false)) {
-    Serial.println(F("[SUCCESS] LoRa packet successfully queued for transmission."));
-  } else {
-    Serial.println(F("[WARNING] Transmit skipped: Radio system busy or duty cycle limit reached."));
-  }
+    
+    // Auto-reset old triggers (cleanup)
+    if (lastChange1 > 0 && (now - lastChange1) > SEQUENCE_WINDOW) {
+        lastChange1 = 0;
+    }
+    if (lastChange2 > 0 && (now - lastChange2) > SEQUENCE_WINDOW) {
+        lastChange2 = 0;
+    }
 }
